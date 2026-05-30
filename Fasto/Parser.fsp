@@ -49,7 +49,7 @@ let rec mkMultiLet decs body =
 //keywords
 %token <Position> BOOL CHAR ELSE FN FUN IF IN INT LET THEN TRUE FALSE NOT AND OR
 //specials
-%token <Position> IOTA LENGTH MAP READ REDUCE WRITE
+%token <Position> IOTA LENGTH MAP READ REDUCE WRITE REPLICATE FILTER SCAN
 //symbols
 %token <Position> MINUS PLUS TIMES DIV DEQ LTH
 %token <Position> NEGATE
@@ -145,6 +145,12 @@ Exp : NUM            { Constant (IntVal (fst $1), snd $1) }
                      { Map ($3, $5, (), (), $1) }
     | REDUCE LPAR FunArg COMMA Exp COMMA Exp RPAR
                      { Reduce ($3, $5, $7, (), $1) }
+    | REPLICATE LPAR Exp COMMA Exp RPAR
+                     { Replicate ($3, $5, (), $1) }
+    | FILTER LPAR FunArg COMMA Exp RPAR
+                     { Filter ($3, $5, (), $1) }
+    | SCAN LPAR FunArg COMMA Exp COMMA Exp RPAR
+                     { Scan ($3, $5, $7, (), $1) }
     | LPAR Exp RPAR  { $2 }
     // TODO: task 1(b): replace this with a more general production
     | LET LetDecs IN Exp        

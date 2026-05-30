@@ -68,6 +68,9 @@ let keyword (s, pos) =
        | "length"       -> Parser.LENGTH pos
        | "map"          -> Parser.MAP pos
        | "reduce"       -> Parser.REDUCE pos
+       | "replicate"    -> Parser.REPLICATE pos
+       | "filter"       -> Parser.FILTER pos
+       | "scan"         -> Parser.SCAN pos
        | "read"         -> Parser.READ pos
        | "write"        -> Parser.WRITE pos
        | "true"          -> Parser.TRUE pos

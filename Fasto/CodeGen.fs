@@ -567,61 +567,168 @@ let rec compileExp  (e      : TypedExp)
          ; LABEL loop_end
          ]
 
-  (* TODO project task 2:
-        `replicate (n, a)`
-        `filter (f, arr)`
-        `scan (f, ne, arr)`
-     Look in `AbSyn.fs` for the shape of expression constructors
-        `Replicate`, `Filter`, `Scan`.
-     General Hint: write down on a piece of paper the C-like pseudocode
-        for implementing them, then translate that to RiscV pseudocode.
-     To allocate heap space for an array you may use `dynalloc` defined
-        above. For example, if `sz_reg` is a register containing an integer `n`,
-        and `ret_type` is the element-type of the to-be-allocated array, then
-        `dynalloc (sz_reg, arr_reg, ret_type)` will alocate enough space for
-        an n-element array of element-type `ret_type` (including the first
-        word that holds the length, and the necessary allignment padding), and
-        will place in register `arr_reg` the start address of the new array.
-        Since you need to allocate space for the result arrays of `Replicate`,
-        `Map` and `Scan`, then `arr_reg` should probably be `place` ...
+  (* Project task 2: replicate(n, a)
+       Allocate a new array of length n and store the value of `a` (held in
+       elem_reg) into each of its n slots.  If n < 0, abort with a runtime
+       error, exactly as iota does. *)
+  | Replicate (n_exp, a_exp, tp, (line, _)) ->
+      let size_reg = newReg "size"     (* the integer n *)
+      let n_code   = compileExp n_exp vtable size_reg
+      let elem_reg = newReg "elem"     (* the value to replicate *)
+      let a_code   = compileExp a_exp vtable elem_reg
 
-     `replicate(n,a)`: You should allocate a new (result) array, and execute a
-        loop of count `n`, in which you store the value hold into the register
-        corresponding to `a` into each memory location corresponding to an
-        element of the result array.
-        If `n` is less than `0` then remember to terminate the program with
-        an error -- see implementation of `iota`.
-  *)
-  | Replicate (_, _, _, _) ->
-      failwith "Unimplemented code generation of replicate"
+      (* Check that n >= 0. *)
+      let safe_lab  = newLab "safe"
+      let checksize = [ BGE (size_reg, Rzero, safe_lab)
+                      ; LI (Ra0, line)
+                      ; LA (Ra1, "m.BadSize")
+                      ; J "p.RuntimeError"
+                      ; LABEL (safe_lab)
+                      ]
 
-  (* TODO project task 2: see also the comment to replicate.
-     (a) `filter(f, arr)`:  has some similarity with the implementation of map.
-     (b) Use `applyFunArg` to call `f(a)` in a loop, for every element `a` of `arr`.
-     (c) If `f(a)` succeeds (result in the `true` value) then (and only then):
-          - set the next element of the result array to `a`, and
-          - increment a counter (initialized before the loop)
-     (d) It is useful to maintain two array iterators: one for the input array `arr`
-         and one for the result array. (The latter increases slower because
-         some of the elements of the input array are skipped because they fail
-         under the predicate).
-     (e) The last step (after the loop writing the elments of the result array)
-         is to update the logical size of the result array to the value of the
-         counter computed in step (c). You do this of course with a
-         `SW(counter_reg, place, 0)` instruction.
-  *)
-  | Filter (_, _, _, _) ->
-      failwith "Unimplemented code generation of filter"
+      let addr_reg  = newReg "addr"    (* address of current slot *)
+      let i_reg     = newReg "i"
+      let init_regs = [ ADDI (addr_reg, place, 4)
+                      ; MV (i_reg, Rzero) ]
 
-  (* TODO project task 2: see also the comment to replicate.
-     `scan(f, ne, arr)`: you can inspire yourself from the implementation of
-        `reduce`, but in the case of `scan` you will need to also maintain
-        an iterator through the result array, and write the accumulator in
-        the current location of the result iterator at every iteration of
-        the loop.
-  *)
-  | Scan (_, _, _, _, _) ->
-      failwith "Unimplemented code generation of scan"
+      let elem_size = getElemSize tp
+      let esz       = elemSizeToInt elem_size
+
+      let loop_beg = newLab "loop_beg"
+      let loop_end = newLab "loop_end"
+      let loop_header = [ LABEL (loop_beg)
+                        ; BGE (i_reg, size_reg, loop_end)
+                        ]
+      (* result[i] := a *)
+      let loop_replicate = [ Store elem_size (elem_reg, addr_reg, 0)
+                           ; ADDI (addr_reg, addr_reg, esz) ]
+      let loop_footer = [ ADDI (i_reg, i_reg, 1)
+                        ; J loop_beg
+                        ; LABEL loop_end
+                        ]
+      n_code
+       @ a_code
+       @ checksize
+       @ dynalloc (size_reg, place, tp)
+       @ init_regs
+       @ loop_header
+       @ loop_replicate
+       @ loop_footer
+
+  (* Project task 2: filter(f, arr)
+       Over-allocate a result array of the same size as the input, then walk
+       the input keeping only the elements for which the predicate f returns
+       true.  A separate output iterator (out_reg) and counter (count_reg)
+       track the kept elements; the result header is patched to the count at
+       the end. *)
+  | Filter (farg, arr_exp, elem_type, pos) ->
+      let arr_reg   = newReg "arr"     (* address of input array *)
+      let size_reg  = newReg "size"    (* logical size of input array *)
+      let arr_code  = compileExp arr_exp vtable arr_reg
+      let get_size  = [ LW (size_reg, arr_reg, 0) ]
+
+      let i_reg     = newReg "i"       (* input loop counter *)
+      let count_reg = newReg "count"   (* number of kept elements *)
+      let inp_reg   = newReg "inp"     (* address of current input element *)
+      let out_reg   = newReg "out"     (* address of current output slot *)
+      let elem_reg  = newReg "elem"    (* current input element value *)
+      let cond_reg  = newReg "cond"    (* predicate result (0/1) *)
+
+      let elem_size = getElemSize elem_type
+      let esz       = elemSizeToInt elem_size
+
+      let init_regs = [ ADDI (inp_reg, arr_reg, 4)
+                      ; ADDI (out_reg, place, 4)
+                      ; MV (i_reg, Rzero)
+                      ; MV (count_reg, Rzero)
+                      ]
+      let loop_beg = newLab "loop_beg"
+      let loop_end = newLab "loop_end"
+      let skip_lab = newLab "skip"
+      let loop_header = [ LABEL (loop_beg)
+                        ; BGE (i_reg, size_reg, loop_end)
+                        ]
+      let loop_body =
+            (* load arr[i], advance input iterator *)
+            [ Load elem_size (elem_reg, inp_reg, 0)
+            ; ADDI (inp_reg, inp_reg, esz)
+            ]
+            (* cond := f(elem) *)
+            @ applyFunArg(farg, [elem_reg], vtable, cond_reg, pos)
+            (* if predicate is false (==0), skip the store *)
+            @ [ BEQ (cond_reg, Rzero, skip_lab)
+              ; Store elem_size (elem_reg, out_reg, 0)
+              ; ADDI (out_reg, out_reg, esz)
+              ; ADDI (count_reg, count_reg, 1)
+              ; LABEL (skip_lab)
+              ]
+      let loop_footer = [ ADDI (i_reg, i_reg, 1)
+                        ; J loop_beg
+                        ; LABEL loop_end
+                        ]
+      (* patch the result header to the actual number of kept elements *)
+      let set_size = [ SW (count_reg, place, 0) ]
+
+      arr_code
+       @ get_size
+       @ dynalloc (size_reg, place, elem_type)
+       @ init_regs
+       @ loop_header
+       @ loop_body
+       @ loop_footer
+       @ set_size
+
+  (* Project task 2: scan(f, ne, arr)
+       Like reduce, but allocate a result array of the same length as the
+       input and write the running accumulator into it at every iteration. *)
+  | Scan (farg, ne_exp, arr_exp, tp, pos) ->
+      let arr_reg  = newReg "arr"      (* running input pointer *)
+      let size_reg = newReg "size"     (* size of input/output array *)
+      let acc_reg  = newReg "acc"      (* the accumulator *)
+      let elem_reg = newReg "elem"     (* loaded input element *)
+      let out_reg  = newReg "out"      (* running output pointer *)
+      let i_reg    = newReg "i"
+
+      let arr_code = compileExp arr_exp vtable arr_reg
+      let get_size = [ LW (size_reg, arr_reg, 0) ]
+      (* accumulator initialised to the neutral element *)
+      let ne_code  = compileExp ne_exp vtable acc_reg
+
+      let elem_size = getElemSize tp
+      let esz       = elemSizeToInt elem_size
+
+      let init_regs = [ ADDI (arr_reg, arr_reg, 4)   (* -> first input element *)
+                      ; ADDI (out_reg, place, 4)     (* -> first output slot *)
+                      ; MV (i_reg, Rzero)
+                      ]
+      let loop_beg = newLab "loop_beg"
+      let loop_end = newLab "loop_end"
+      let loop_header = [ LABEL (loop_beg)
+                        ; BGE (i_reg, size_reg, loop_end)
+                        ]
+      let loop_body =
+            (* load arr[i], advance input pointer *)
+            [ Load elem_size (elem_reg, arr_reg, 0)
+            ; ADDI (arr_reg, arr_reg, esz)
+            ]
+            (* acc := f(acc, arr[i]) *)
+            @ applyFunArg(farg, [acc_reg; elem_reg], vtable, acc_reg, pos)
+            (* result[i] := acc *)
+            @ [ Store elem_size (acc_reg, out_reg, 0)
+              ; ADDI (out_reg, out_reg, esz)
+              ]
+      let loop_footer = [ ADDI (i_reg, i_reg, 1)
+                        ; J loop_beg
+                        ; LABEL loop_end
+                        ]
+      arr_code
+       @ get_size
+       @ dynalloc (size_reg, place, tp)
+       @ ne_code
+       @ init_regs
+       @ loop_header
+       @ loop_body
+       @ loop_footer
 
 and applyFunArg ( ff     : TypedFunArg
                 , args   : reg list
