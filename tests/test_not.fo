@@ -1,0 +1,1 @@
+fun int main() = if not true then 0 else 42
